@@ -1,0 +1,115 @@
+#--------------------------------#
+# Power Structure Part           #
+#--------------------------------#
+upf_version 2.1
+
+###Supply ports
+# 1.2V
+create_supply_port VDD
+# 1.0—1.2V
+create_supply_port VDD_CPUS
+# Ground
+create_supply_port VSS
+
+###Supply nets
+# 1.2V
+create_supply_net VDD
+connect_supply_net VDD -ports VDD
+
+# 1.2V switchable
+create_supply_net VDDSW_AES
+
+# 1.0—1.2V
+create_supply_net VDD_CPU
+connect_supply_net VDD_CPU -ports VDD_CPU
+
+# Common ground for all domains
+create_supply_net VSS
+connect_supply_net VSS -ports VSS
+
+###Power supply grouping to create domain specific ground and power net sets
+#Supply set for PD_top
+create_supply_set SS_top -function {power VDD} -function {ground VSS}
+
+#Supply set for PD_cpu
+create_supply_set SS_cpu -function {power VDD_CPU} -function {ground VSS}
+
+#Supply set for PD_aes
+create_supply_set SS_aes -function {power VDDSW_AES} -function {ground VSS} -function {nwell VDD}
+
+###Creating power domains and assign power supply nets
+create_power_domain PD_top -elements {.} -supply {primary SS_top}
+
+create_power_domain PD_cpu -elements {system_top_inst/cpu/LM32} -supply {primary SS_cpu}
+
+create_power_domain PD_aes -elements {system_top_inst/cpu/AES_128_Core} -supply {primary SS_aes} -supply {backup SS_top}
+
+#--------------------------------#
+# Power State Definitions        #
+#--------------------------------#
+###Set domain-level power states
+#PD_top
+add_power_state -supply SS_top \
+    -state HIGH_ON {-supply_expr {power == `{FULL_ON, 1.08} && ground == `{FULL_ON, 0.00}}}
+
+#PD_cpu
+add_power_state —supply SS_cpu \
+    -state MID_ON {-supply_expr {power == `{FULL_ON, O.88}}}
+
+#Switchable domain on and off states (aes)
+add_power_state —supply SS_aes \
+    -state SW_OFF {-supply_expr {power == `{OFF}}} \
+    -state SW_ON {-supply_expr {power == `{FULL_ON, l.08}}}
+    
+###Set system—level power states
+add_power_state —domain PD_top \
+    -state aes_off {-logic_expr {SS_aes == SW_OFF}} \
+    -state aes_on {-logic_expr {SS_aes == SW_ON}}
+    
+#--------------------------------#
+# Low Power Strategies           #
+#--------------------------------#
+###Isolation strategies
+set_isolation PD_aes_iso -domain PD_aes -applies_to outputs -clamp_value O \
+    -isolation_supply_set SS_top -location self \
+    -isolation_signal {system_top_inst/inst_power_controller/aes_pwr_clamp}
+    
+#Map isolation cells
+use_interface_cell PD_aes_intf -strategy PD_aes_iso -domain PD_aes \
+    -lib_cells {PEN_ISOSlCLO_PW_*}
+    
+###Level shifting strategies
+set_level_shifter PD_cpu_lvl_down -domain PD_cpu -applies_to inputs \
+    -rule high_to_low -location self
+set_level_shifter PD_cpu_lvl_up -domain PD_cpu -applies_to outputs \
+    -rule low_to_high -location parent
+    
+#Map level shifting cells
+#high—to—low
+use_interface_cell PD_cpu_intf_dn -strategy PD_cpu_lvl_down -domain PD_cpu \
+    -lib_Cells {PEN_LVLDBUF_DW_* PEN_LVLDINV_DW_* PEN_LVLDINVE1_DW_*}
+    
+#low—to—high
+use_interface_cell PD_cpu_intf_up -strategy PD_cpu_lvl_up -domain PD_cpu \
+    -lib_Cells {PEN_LVLDBUFO_UW_*}
+    
+###Power switch strategies
+create_power_switch PD_aes_PSW -domain PD_aes \
+    -input_supply_port {VDDP VDD} \
+    -output_supply_port {VDDC VDDSW_AES} \
+    -control_port {EN system_top_inst/inst_power_controller/aes_pwr_down_req_n} \
+    -ack_port {ENX system_top_inst/inst_power_controller/aes_pwr_down_ack_n} \
+    -on_state {aes_on_state VDDP {EN}}
+    
+#Map power switch cells
+map_power_switch PD_aes_PSW -domain PD_aes \
+    -lib_cells {PEN_PGATBDRV_OW_* PEN_PGATBDRV_OWY2_*}
+    
+###State retention strategy
+set_retention PD_aes_STR -domain PD_aes -retention_supply_set SS_top \
+    -save_signal {system_top_inst/inst_power_controller/aes_retain_n low} \
+    -restore_signal {system_top_inst/inst_power_controller/aes_restore_n low}
+    
+#Map retention cells
+map_retention_cell PD_aes_STR -domain PD_aes \
+    -lib_cells {PEN_FSBZDPSBQ_PTW_* PEN_FSB2DPRBQ_PTW_* PEN_FSB2DPQ_PTW_*}   
